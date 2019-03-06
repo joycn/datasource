@@ -9,6 +9,7 @@ import (
 	"github.com/sirupsen/logrus"
 	"io/ioutil"
 	"os"
+	"path"
 	//"regexp"
 	"strings"
 	"time"
@@ -26,7 +27,10 @@ type watchCallback func(string) error
 
 type client struct {
 	*clientv3.Client
-	watches map[string]clientv3.WatchChan
+	watches      map[string]clientv3.WatchChan
+	username     string
+	domainPrefix string
+	subnetPrefix string
 }
 
 func newEtcdclient(machines []string, cert, key, caCert string, basicAuth bool, username string, password string) (*client, error) {
@@ -51,7 +55,7 @@ func newEtcdclient(machines []string, cert, key, caCert string, basicAuth bool, 
 	if caCert != "" {
 		certBytes, err := ioutil.ReadFile(caCert)
 		if err != nil {
-			return &client{cli, watches}, err
+			return nil, err
 		}
 
 		caCertPool := x509.NewCertPool()
@@ -66,7 +70,7 @@ func newEtcdclient(machines []string, cert, key, caCert string, basicAuth bool, 
 	if cert != "" && key != "" {
 		tlsCert, err := tls.LoadX509KeyPair(cert, key)
 		if err != nil {
-			return &client{cli, watches}, err
+			return nil, err
 		}
 		tlsConfig.Certificates = []tls.Certificate{tlsCert}
 		tlsEnabled = true
@@ -78,9 +82,9 @@ func newEtcdclient(machines []string, cert, key, caCert string, basicAuth bool, 
 
 	cli, err := clientv3.New(cfg)
 	if err != nil {
-		return &client{cli, watches}, err
+		return nil, err
 	}
-	return &client{cli, watches}, nil
+	return &client{cli, watches, username, path.Join(DomainPrefix, username), path.Join(SubnetsPrefix, username)}, nil
 }
 
 func (c *client) getValues(key string) (map[string]string, error) {
@@ -100,21 +104,21 @@ func (c *client) getValues(key string) (map[string]string, error) {
 func (c *client) getAccessListConfig() (*accessListConfig, error) {
 	alc := new(accessListConfig)
 	domains := []string{}
-	domainMap, err := c.getValues(DomainPrefix)
+	domainMap, err := c.getValues(c.domainPrefix)
 	if err != nil {
 		return nil, err
 	}
 
 	for k := range domainMap {
-		domains = append(domains, strings.TrimPrefix(k, DomainPrefix))
+		domains = append(domains, strings.TrimPrefix(k, c.domainPrefix))
 	}
 	subnets := []string{}
-	subnetsMap, err := c.getValues(SubnetsPrefix)
+	subnetsMap, err := c.getValues(c.subnetPrefix)
 	if err != nil {
 		return nil, err
 	}
 	for k := range subnetsMap {
-		subnets = append(subnets, strings.TrimPrefix(k, SubnetsPrefix))
+		subnets = append(subnets, strings.TrimPrefix(k, c.subnetPrefix))
 	}
 
 	alc.Domains = domains
@@ -134,7 +138,7 @@ func AccessListFromEtcd(machine string) (*AccessList, error) {
 	if username == "" || password == "" {
 		return nil, fmt.Errorf("no username or password provided")
 	}
-	c, err := newEtcdclient([]string{machine}, "", "", "", true, params[1], params[2])
+	c, err := newEtcdclient([]string{machine}, "", "", "", true, username, password)
 	if err != nil {
 		return nil, err
 	}
@@ -154,12 +158,12 @@ func AccessListFromEtcd(machine string) (*AccessList, error) {
 	go func() {
 		ctxnew, cancel := context.WithCancel(ctx)
 		defer cancel()
-		c.watchUpdate(ctxnew, DomainPrefix, al.AddDomain, al.DeleteDomain)
+		c.watchUpdate(ctxnew, c.domainPrefix, al.AddDomain, al.DeleteDomain)
 	}()
 	go func() {
 		ctxnew, cancel := context.WithCancel(ctx)
 		defer cancel()
-		c.watchUpdate(ctxnew, SubnetsPrefix, al.AddSubnet, al.DeleteSubnet)
+		c.watchUpdate(ctxnew, c.subnetPrefix, al.AddSubnet, al.DeleteSubnet)
 	}()
 	return al, err
 }
@@ -170,7 +174,7 @@ func (c *client) watchUpdate(ctx context.Context, prefix string, add, del watchC
 	for {
 		wresp := <-rch
 		for _, ev := range wresp.Events {
-			k := strings.TrimPrefix(string(ev.Kv.Key), prefix)
+			k := path.Base(strings.TrimPrefix(string(ev.Kv.Key), prefix))
 			switch ev.Type {
 			case clientv3.EventTypePut:
 				err = add(k)
