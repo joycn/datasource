@@ -116,8 +116,6 @@ func GetAccessList(source string) (*AccessList, error) {
 	switch tokens[0] {
 	case "file":
 		return AccessListFromFile(tokens[1])
-	case "etcd":
-		return AccessListFromEtcd(tokens[1])
 	}
 	return nil, fmt.Errorf("unsupported datasource")
 }
